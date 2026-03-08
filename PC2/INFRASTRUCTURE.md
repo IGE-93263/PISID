@@ -157,3 +157,140 @@ projeto/
     ├── labirinto.sql           ← Schema: cria as tabelas (executa 1.º)
     └── labirinto_preencher.sql ← Dados: preenche as tabelas (executa 2.º)
 ```
+
+---
+
+# 🔁 Teste do Fluxo Completo: MQTT → MongoDB → MySQL
+
+## Pré-requisitos
+
+1. **MongoDB** (3 réplicas no Docker)
+2. **MySQL** (Docker ou local) com base `labirinto`
+3. **Schema e seed** em MySQL — o `docker-compose.yml` faz isto automaticamente no primeiro arranque via:
+   - `labirinto.sql` — cria o schema com FKs (executa 1.º)
+   - `labirinto_preencher.sql` — insere dados mínimos: equipa 19, salas 0–10, utilizador, simulacao 1 (executa 2.º)
+
+4. **Ficheiro `db_mysql.py`** — deve estar na mesma pasta que `mongo_to_mysql.py` com as credenciais de ligação ao MySQL:
+
+```python
+import os
+import mysql.connector
+
+MYSQL_CONFIG = {
+    "host":     os.environ.get("MYSQL_HOST",     "localhost"),
+    "user":     os.environ.get("MYSQL_USER",     "root"),
+    "password": os.environ.get("MYSQL_PASSWORD", "root"),
+    "database": os.environ.get("MYSQL_DATABASE", "labirinto"),
+    "port":     int(os.environ.get("MYSQL_PORT", 3306)),
+}
+
+def get_connection():
+    return mysql.connector.connect(**MYSQL_CONFIG)
+```
+
+   > 💡 Os valores `root` já estão definidos por defeito — não precisas de definir variáveis de ambiente.
+   > Se quiseres sobrepor, podes fazê-lo assim:
+
+   **Windows (CMD):**
+   ```cmd
+   set MYSQL_HOST=localhost
+   set MYSQL_USER=root
+   set MYSQL_PASSWORD=root
+   set MYSQL_DATABASE=labirinto
+   ```
+
+   **Windows (PowerShell):**
+   ```powershell
+   $env:MYSQL_HOST="localhost"
+   $env:MYSQL_USER="root"
+   $env:MYSQL_PASSWORD="root"
+   $env:MYSQL_DATABASE="labirinto"
+   ```
+
+   **Mac/Linux:**
+   ```bash
+   export MYSQL_HOST=localhost
+   export MYSQL_USER=root
+   export MYSQL_PASSWORD=root
+   export MYSQL_DATABASE=labirinto
+   ```
+
+   > ⚠️ Estas variáveis são **temporárias** — só existem na janela do terminal onde as correste. Se abrires uma nova janela, tens de as correr novamente.
+
+5. **Dependências:**
+```bash
+pip install pymongo mysql-connector-python paho-mqtt
+```
+
+---
+
+## Passos para Testar
+
+### 1. Ligar a Infraestrutura
+
+```powershell
+cd C:\dev\mysqldocker
+docker-compose up -d
+```
+
+> Aguarda ~30 s para o MySQL inicializar.
+
+### 2. Arrancar os Componentes (em janelas separadas)
+
+```powershell
+# Janela 1 — Jogador (MQTT → MongoDB)
+cd C:\Users\PC\Desktop\PISID\jogador
+python mqtt_to_mongo.py 19
+
+# Janela 2 — Migração (MongoDB → MySQL)
+cd C:\Users\PC\Desktop\PISID\jogador
+python mongo_to_mysql.py 19
+
+# Janela 3 — Simulador
+cd C:\Users\PC\Desktop\PISID\mazerun
+.\mazerun.exe 19 --flagMessage 1
+```
+
+> **Ordem:** arranca as janelas 1 e 2 primeiro, depois a 3.
+
+### 3. Verificar o Fluxo
+
+**MongoDB** — novos documentos nas coleções:
+```powershell
+mongosh --port 27017
+> use pisid_grupo19
+> db.movimento.countDocuments()
+> db.temperatura.countDocuments()
+> db.som.countDocuments()
+```
+
+**MySQL** — novos registos nas tabelas (via phpMyAdmin em http://localhost:9001 ou terminal):
+```sql
+USE labirinto;
+SELECT COUNT(*) FROM temperatura;
+SELECT COUNT(*) FROM som;
+SELECT COUNT(*) FROM medicoespassagens;
+SELECT * FROM temperatura ORDER BY IDTemperatura DESC LIMIT 5;
+```
+
+**Migração** — no terminal do `mongo_to_mysql.py` devem surgir linhas como:
+```
+Migrados: 15 docs
+```
+
+### 4. Teste de Failover MongoDB (opcional)
+
+1. Com tudo a correr, para o `mongo1`: `docker stop mongo1`
+2. O `mqtt_to_mongo.py` faz failover automaticamente para `27018` ou `27019`
+3. A migração continua a funcionar (lê de qualquer nó disponível)
+4. Reinicia o `mongo1`: `docker start mongo1`
+
+---
+
+## Resumo do Fluxo
+
+| Janela | Componente | Função |
+|---|---|---|
+| 1 | `mqtt_to_mongo.py` | MQTT → MongoDB |
+| 2 | `mongo_to_mysql.py` | MongoDB → MySQL (a cada 5 s) |
+| 3 | `mazerun.exe` | Publica sensores no MQTT |
