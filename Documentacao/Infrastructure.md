@@ -1,94 +1,155 @@
 # 🏗️ Documentação da Infraestrutura do Projeto
 
-Este documento explica os ficheiros principais usados para levantar e gerir a infraestrutura local deste projeto, que inclui serviços de **PHP**, **MySQL** e um **cluster MongoDB**.
+Este documento explica como levantar e gerir a infraestrutura local do projeto, que inclui serviços de **PHP**, **MySQL** e um **cluster MongoDB** em Replica Set.
+
+> **Ficheiros principais:** `docker-compose.yml` · `reset_bd.bat`
 
 ---
 
-## 1. Script de Reset — `reset_bd.bat`
+## ⚡ Arranque Rápido
 
-Este ficheiro é um script de automação para Windows (PowerShell/CMD). A sua função principal é fazer um **Hard Reset** à base de dados MySQL.
+```bash
+docker-compose up -d
+```
 
-> Como o Docker apenas importa o ficheiro `labirinto.sql` na **primeira vez** que a base de dados é criada, este script automatiza o processo de apagar o histórico e simular uma instalação limpa.
+Isto é tudo o que precisas para a primeira vez. O Docker trata de:
+- Criar a base de dados `labirinto` automaticamente
+- Importar o ficheiro `labirinto.sql` com todas as tabelas
+- Configurar o cluster MongoDB
 
-### O que cada bloco faz
+### Acesso aos Serviços
 
-| Bloco | Descrição |
-|---|---|
-| `@echo off` / `echo ...` | Esconde os comandos técnicos no terminal e mostra apenas mensagens amigáveis para sabermos em que passo estamos. |
-| `docker-compose down` | Pára e remove todos os contentores, redes e volumes temporários em execução. |
-| `rmdir /s /q .\mysql_data` | Apaga a pasta física onde o MySQL guarda os ficheiros de sistema no computador local. |
-| `mkdir .\mysql_data` | Recria a pasta vazia, forçando o Docker a tratá-la como uma instalação nova. |
-| `docker-compose up -d` | Reinicia todos os serviços em segundo plano. O MySQL, ao ver a pasta vazia, importa automaticamente o `labirinto.sql`. |
+| Serviço | URL | Credenciais |
+|---|---|---|
+| Aplicação PHP | http://localhost:9000 | — |
+| phpMyAdmin | http://localhost:9001 | Server: `mysql` · User: `root` · Password: `root` |
+| MySQL | `localhost:3306` | User: `root` · Password: `root` |
+| MongoDB Primary | `localhost:27017` | — |
+| MongoDB Secondary | `localhost:27018` | — |
+| MongoDB Secondary | `localhost:27019` | — |
 
 ---
 
-## 2. Orquestrador de Contentores — `docker-compose.yml`
+## 🔄 Reset da Base de Dados — `reset_bd.bat`
 
-O `docker-compose.yml` é o **coração da infraestrutura**. Define como os vários contentores se comportam, comunicam entre si e se ligam ao computador físico.
+> **Quando usar:** sempre que precisares de apagar tudo e reimportar o `labirinto.sql` do zero (ex: após alterações ao schema ou dados corrompidos).
+
+O Docker só importa o `labirinto.sql` **na primeira vez** que a base de dados é criada. Este script simula uma "instalação nova" ao apagar o histórico físico.
+
+### Como executar
+
+Faz duplo clique no `reset_bd.bat` ou corre no terminal:
+
+```cmd
+.\reset_bd.bat
+```
+
+### O que o script faz (passo a passo)
+
+```bat
+docker-compose down          ← Para e remove todos os contentores
+rmdir /s /q .\mysql_data     ← Apaga a pasta com os dados do MySQL
+mkdir .\mysql_data            ← Recria a pasta vazia
+docker-compose up -d         ← Reinicia tudo; MySQL reimporta o labirinto.sql
+```
+
+> ⚠️ **Atenção:** Este processo **apaga todos os dados** da base de dados MySQL. Faz backup antes se necessário.
 
 ---
+
+## 🐳 Infraestrutura — `docker-compose.yml`
 
 ### Serviço: `php`
 
-- **Objetivo:** Servidor web para correr o código da aplicação.
-- **Configuração:** Constrói a imagem através de um `Dockerfile` local (em vez de usar uma imagem pré-definida).
-- **Volumes:** Mapeia `./src` → `/var/www/html`, permitindo editar o código PHP localmente e ver as alterações em tempo real.
-- **Acesso:** [`http://localhost:9000`](http://localhost:9000)
+Servidor web que corre o código da aplicação.
+
+```yaml
+build: . / Dockerfile     # Imagem construída localmente
+volumes: ./src → /var/www/html  # Edita o código e vês as alterações em tempo real
+ports: 9000:80
+depends_on: mysql         # MySQL arranca antes do PHP
+```
 
 ---
 
 ### Serviço: `mysql`
 
-- **Objetivo:** Base de dados relacional.
-- **Configuração:** Versão `8.0`, palavra-passe do utilizador `root` definida como `root`. A variável `MYSQL_DATABASE: labirinto` cria a base de dados automaticamente.
-- **Acesso:** Porta padrão `3306`.
+Base de dados relacional principal do projeto.
 
-#### Volumes configurados
+```yaml
+image: mysql:8.0
+platform: linux/amd64     # Compatibilidade com Macs Apple Silicon
+restart: no
+```
 
-| Volume | Função |
-|---|---|
-| `.\mysql_data` | Persiste os dados para não se perderem ao desligar o contentor. |
-| `.\mysql_files` | Pasta segura para troca de ficheiros (ex: CSVs). |
-| `.\mysql_files\labirinto.sql` | Injeta o SQL em `/docker-entrypoint-initdb.d/`, criando as tabelas no primeiro arranque. |
+**Variáveis de ambiente:**
+
+| Variável | Valor | Função |
+|---|---|---|
+| `MYSQL_ROOT_PASSWORD` | `root` | Password do utilizador root |
+| `MYSQL_DATABASE` | `labirinto` | Cria a BD automaticamente no arranque |
+| `MYSQL_DEFAULT_AUTHENTICATION_PLUGIN` | `mysql_native_password` | Compatibilidade com PHP |
+
+**Volumes:**
+
+| Volume local | Destino no contentor | Função |
+|---|---|---|
+| `./mysql_data/` | `/var/lib/mysql` | Persiste os dados entre reinicios |
+| `./mysql_files/` | `/var/lib/mysql-files/` | Pasta segura para importar/exportar CSVs |
+| `./mysql_files/labirinto.sql` | `/docker-entrypoint-initdb.d/labirinto.sql` | **Importa o schema e dados no primeiro arranque** |
 
 ---
 
 ### Serviço: `phpmyadmin`
 
-- **Objetivo:** Interface visual para gerir o MySQL.
-- **Configuração:** `PMA_ARBITRARY: 1` permite especificar o servidor (ex: `mysql`) no ecrã de login.
-- **Acesso:** [`http://localhost:9001`](http://localhost:9001)
+Interface gráfica para gerir o MySQL no browser.
+
+```yaml
+image: phpmyadmin:latest
+ports: 9001:80
+PMA_ARBITRARY: 1    # Permite escolher o servidor no ecrã de login
+```
+
+Acede em **http://localhost:9001** e usa `mysql` como Server.
 
 ---
 
-### Serviços MongoDB — `mongo1`, `mongo2`, `mongo3`
+### Cluster MongoDB — `mongo1`, `mongo2`, `mongo3`
 
-- **Objetivo:** Criar um cluster de bases de dados NoSQL em **Replica Set**.
-- **Configuração:** Três instâncias independentes do MongoDB nas portas `27017`, `27018` e `27019`.
-- **Comando:** `--replSet rs0` informa as instâncias que pertencem ao mesmo grupo de replicação.
+Três instâncias MongoDB configuradas como **Replica Set** (`rs0`).
+
+| Contentor | Porta externa | Função no cluster |
+|---|---|---|
+| `mongo1` | `27017` | **Primary** (priority: 2) |
+| `mongo2` | `27018` | Secondary (priority: 1) |
+| `mongo3` | `27019` | Secondary (priority: 1) |
+
+Todos os nós arrancam com `--replSet rs0 --bind_ip_all`.
 
 ---
 
 ### Serviço: `mongo-setup`
 
-- **Objetivo:** Configurar automaticamente o cluster MongoDB.
-- **Como funciona:**
-  1. Arranca apenas **depois** dos três nós MongoDB estarem em execução.
-  2. Aguarda **20 segundos** para garantir que estão prontos.
-  3. Executa um script via `mongosh` que liga os três nós:
-     - `mongo1` → nó **Primary** (`priority: 2`)
-     - `mongo2`, `mongo3` → nós **Secondary** (`priority: 1`)
-  4. Se o cluster já estiver configurado, deteta isso sem gerar erros.
+Contentor temporário que configura o Replica Set automaticamente.
+
+**Fluxo de execução:**
+1. Aguarda 20 segundos (para os três nós estarem prontos)
+2. Liga ao `mongo1` e executa `rs.initiate()` com as prioridades definidas
+3. Aguarda a eleição do Primary
+4. Imprime o status dos membros
+5. Se o cluster já estiver configurado (`AlreadyInitialized`), deteta isso sem erros e mostra o status atual
 
 ---
 
-## Resumo dos Acessos
+## 📁 Estrutura de Pastas Esperada
 
-| Serviço | URL / Porta |
-|---|---|
-| PHP (Aplicação) | `http://localhost:9000` |
-| phpMyAdmin | `http://localhost:9001` |
-| MySQL | `localhost:3306` |
-| MongoDB 1 | `localhost:27017` |
-| MongoDB 2 | `localhost:27018` |
-| MongoDB 3 | `localhost:27019` |
+```
+projeto/
+├── docker-compose.yml
+├── reset_bd.bat
+├── Dockerfile
+├── src/                    ← Código PHP da aplicação
+├── mysql_data/             ← Dados do MySQL (gerido pelo Docker)
+└── mysql_files/
+    └── labirinto.sql       ← Schema e dados iniciais da BD
+```
