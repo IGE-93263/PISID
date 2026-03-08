@@ -1,0 +1,76 @@
+# =========================
+# Dados gerados em runtime
+# =========================
+
+# Checkpoint da migração MongoDB → MySQL (estado gerado automaticamente)
+python/migration_checkpoint.json
+
+# Buffer de mensagens MQTT quando MongoDB está indisponível
+python/mqtt_fallback.json
+
+
+# =========================
+# Base de Dados MySQL
+# =========================
+
+# Dados físicos do MySQL (geridos pelo Docker)
+mysql_data/
+
+
+# =========================
+# Python
+# =========================
+
+# Cache e bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Ficheiros de configuração local (credenciais)
+.env
+*.env
+
+
+# =========================
+# Sistema Operativo
+# =========================
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Linux
+*~
+
+
+# =========================
+# Editores e IDEs
+# =========================
+
+# VSCode
+.vscode/
+
+# JetBrains (PyCharm, IntelliJ)
+.idea/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+
+# =========================
+# Ficheiros temporários
+# =========================
+*.log
+*.tmp
+*.bak
+delete.md
