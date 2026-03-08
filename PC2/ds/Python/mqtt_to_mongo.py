@@ -7,12 +7,15 @@ MQTT -> MongoDB. Tolerância a falhas (crash DB/PC/software).
 """
 import json
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 from pymongo import MongoClient
 from pymongo.write_concern import WriteConcern
+
+from gatilho_odd_even import GatilhoOddEven
 
 BROKER = "broker.emqx.io"
 PORT = 1883
@@ -28,6 +31,9 @@ porta_atual = None
 fila_fallback = []  # mensagens em espera quando MongoDB indisponível
 FALLBACK_FILE = Path(__file__).parent / "mqtt_fallback.json"
 wc = WriteConcern(w="majority")
+
+# Tracker de gatilhos odd/even (inicializado em main após ter o cliente MQTT)
+_gatilho_tracker = None
 
 
 def carregar_fila():
@@ -124,6 +130,10 @@ def on_message(c, userdata, msg):
     grupo = userdata["grupo"]
     topic = msg.topic
 
+    # Lógica dos gatilhos odd/even — processada em tempo real a partir dos movimentos
+    if "mazemov" in topic and _gatilho_tracker is not None:
+        _gatilho_tracker.processar_movimento(data)
+
     for tentativa in range(2):
         try:
             db = get_db(grupo)
@@ -172,6 +182,23 @@ def main():
     c.on_message = on_message
     c.reconnect_delay_set(min_delay=1, max_delay=120)
     c.connect(BROKER, PORT, 60)
+
+    # Inicializar tracker de gatilhos odd/even com o cliente MQTT já criado
+    global _gatilho_tracker
+    _gatilho_tracker = GatilhoOddEven(grupo=grupo, mqtt_client=c)
+    print(f"Tracker odd/even ativo (max {3} gatilhos/sala)")
+
+    # Thread de debug — imprime estado das salas a cada 15 segundos
+    DEBUG_INTERVALO = 15
+
+    def debug_loop():
+        while True:
+            threading.Event().wait(DEBUG_INTERVALO)
+            if _gatilho_tracker:
+                _gatilho_tracker.imprimir_estado()
+
+    t = threading.Thread(target=debug_loop, daemon=True)
+    t.start()
     try:
         c.loop_forever()
     finally:

@@ -16,6 +16,8 @@ from pathlib import Path
 from bson import ObjectId
 from pymongo import MongoClient
 
+from outlier_detector import validar_temperatura, validar_som
+
 try:
     from db_mysql import get_connection, MYSQL_CONFIG
 except ImportError:
@@ -106,17 +108,25 @@ def migrar_temperatura(conn_mysql, docs, grupo):
     if not docs:
         return 0
     cursor = conn_mysql.cursor()
-    n = 0
+    n = n_rejeitados = 0
     for d in docs:
         try:
+            raw = d.get("Temperature", d.get("temperatura"))
+            valor, motivo = validar_temperatura(raw)
+            if valor is None:
+                n_rejeitados += 1
+                print(f"  [OUTLIER temperatura] rejeitado — {motivo}")
+                continue
             sql = "INSERT INTO temperatura (IDSimulacao, Hora, Temperatura) VALUES (%s, %s, %s)"
             hora = hora_valida(d.get("Hour", d.get("Hora")))
-            cursor.execute(sql, (ID_SIMULACAO, hora, str(d.get("Temperature", d.get("temperatura", "")))))
+            cursor.execute(sql, (ID_SIMULACAO, hora, str(valor)))
             n += 1
         except Exception as e:
             print(f"  Erro temperatura: {e}")
     conn_mysql.commit()
     cursor.close()
+    if n_rejeitados:
+        print(f"  Temperatura: {n} inseridos, {n_rejeitados} rejeitados (outliers/dados sujos)")
     return n
 
 
@@ -125,17 +135,25 @@ def migrar_som(conn_mysql, docs, grupo):
     if not docs:
         return 0
     cursor = conn_mysql.cursor()
-    n = 0
+    n = n_rejeitados = 0
     for d in docs:
         try:
+            raw = d.get("Sound", d.get("som"))
+            valor, motivo = validar_som(raw)
+            if valor is None:
+                n_rejeitados += 1
+                print(f"  [OUTLIER som] rejeitado — {motivo}")
+                continue
             sql = "INSERT INTO som (IDSimulacao, Hora, Som) VALUES (%s, %s, %s)"
             hora = hora_valida(d.get("Hour", d.get("Hora")))
-            cursor.execute(sql, (ID_SIMULACAO, hora, str(d.get("Sound", d.get("som", "")))))
+            cursor.execute(sql, (ID_SIMULACAO, hora, str(valor)))
             n += 1
         except Exception as e:
             print(f"  Erro som: {e}")
     conn_mysql.commit()
     cursor.close()
+    if n_rejeitados:
+        print(f"  Som: {n} inseridos, {n_rejeitados} rejeitados (outliers/dados sujos)")
     return n
 
 
