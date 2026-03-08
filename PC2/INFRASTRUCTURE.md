@@ -50,7 +50,7 @@ Faz duplo clique no `reset_bd.bat` ou corre no terminal:
 docker-compose down          ← Para e remove todos os contentores
 rmdir /s /q .\mysql_data     ← Apaga a pasta com os dados do MySQL
 mkdir .\mysql_data            ← Recria a pasta vazia
-docker-compose up -d         ← Reinicia tudo; MySQL reimporta o labirinto.sql
+docker-compose up -d         ← Reinicia tudo; MySQL reimporta o labirinto.sql e labirinto_preencher.sql
 ```
 
 > ⚠️ **Atenção:** Este processo **apaga todos os dados** da base de dados MySQL. Faz backup antes se necessário.
@@ -96,7 +96,10 @@ restart: no
 |---|---|---|
 | `./mysql_data/` | `/var/lib/mysql` | Persiste os dados entre reinicios |
 | `./mysql_files/` | `/var/lib/mysql-files/` | Pasta segura para importar/exportar CSVs |
-| `./mysql_files/labirinto.sql` | `/docker-entrypoint-initdb.d/labirinto.sql` | **Importa o schema e dados no primeiro arranque** |
+| `./mysql_files/labirinto.sql` | `/docker-entrypoint-initdb.d/labirinto.sql` | Cria as tabelas no primeiro arranque (executa 1.º) |
+| `./mysql_files/labirinto_preencher.sql` | `/docker-entrypoint-initdb.d/labirinto_preencher.sql` | **Insere os dados iniciais após criar as tabelas (executa 2.º)** |
+
+> 💡 A pasta `/docker-entrypoint-initdb.d/` executa os ficheiros por **ordem alfabética**, o que garante que `labirinto.sql` (schema) é sempre executado antes de `labirinto_preencher.sql` (dados).
 
 ---
 
@@ -151,5 +154,6 @@ projeto/
 ├── src/                    ← Código PHP da aplicação
 ├── mysql_data/             ← Dados do MySQL (gerido pelo Docker)
 └── mysql_files/
-    └── labirinto.sql       ← Schema e dados iniciais da BD
+    ├── labirinto.sql           ← Schema: cria as tabelas (executa 1.º)
+    └── labirinto_preencher.sql ← Dados: preenche as tabelas (executa 2.º)
 ```
