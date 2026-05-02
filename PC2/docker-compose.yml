@@ -1,0 +1,39 @@
+version: '3.9'
+
+services:
+  php:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./src:/var/www/html
+    ports:
+      - "9000:80"
+    depends_on:
+      - mysql
+
+  mysql:
+    platform: linux/amd64
+    image: mysql:8.0
+    container_name: mysql
+    restart: no
+    environment:
+      MYSQL_ROOT_PASSWORD: 'root'
+      MYSQL_DEFAULT_AUTHENTICATION_PLUGIN: mysql_native_password
+      MYSQL_DATABASE: labirinto
+    volumes:
+      - ./mysql_data/:/var/lib/mysql
+      - ./mysql_files:/var/lib/mysql-files/
+      - ./mysql_files/labirinto.sql:/docker-entrypoint-initdb.d/labirinto.sql
+    ports:
+      - "3306:3306"
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    restart: always
+    ports:
+      - "9001:80"
+    environment:
+      PMA_ARBITRARY: 1
+    depends_on:
+      - mysql

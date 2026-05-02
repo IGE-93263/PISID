@@ -1,0 +1,6 @@
+@echo off
+echo A parar e apagar contentores MongoDB...
+docker-compose down -v
+echo A reiniciar MongoDB...
+docker-compose up -d
+echo Feito. Aguarda ~30s para o replica set inicializar.
