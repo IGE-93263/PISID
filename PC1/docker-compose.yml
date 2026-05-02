@@ -1,44 +1,50 @@
-version: '3.8'
+version: '3.9'
 
 services:
   mongo1:
-    image: mongo:6.0
+    image: mongo:latest
     container_name: mongo1
-    command: ["--replSet", "labirinto-rs", "--bind_ip_all", "--port", "27017"]
     ports:
       - "27017:27017"
-    volumes:
-      - mongo1_data:/data/db
-    networks:
-      - labirinto-network
+    command: mongod --replSet rs0 --bind_ip_all
 
   mongo2:
-    image: mongo:6.0
+    image: mongo:latest
     container_name: mongo2
-    command: ["--replSet", "labirinto-rs", "--bind_ip_all", "--port", "27017"]
     ports:
       - "27018:27017"
-    volumes:
-      - mongo2_data:/data/db
-    networks:
-      - labirinto-network
+    command: mongod --replSet rs0 --bind_ip_all
 
   mongo3:
-    image: mongo:6.0
+    image: mongo:latest
     container_name: mongo3
-    command: ["--replSet", "labirinto-rs", "--bind_ip_all", "--port", "27017"]
     ports:
       - "27019:27017"
-    volumes:
-      - mongo3_data:/data/db
-    networks:
-      - labirinto-network
+    command: mongod --replSet rs0 --bind_ip_all
 
-networks:
-  labirinto-network:
-    driver: bridge
-
-volumes:
-  mongo1_data:
-  mongo2_data:
-  mongo3_data:
+  mongo-setup:
+    image: mongo:latest
+    container_name: mongo-setup
+    depends_on: [mongo1, mongo2, mongo3]
+    command: >
+      bash -c "
+        sleep 20 &&
+        mongosh --host mongo1:27017 --eval '
+          try {
+            rs.initiate({
+              _id: \"rs0\",
+              members: [
+                {_id: 0, host: \"mongo1:27017\", priority: 2},
+                {_id: 1, host: \"mongo2:27017\", priority: 1},
+                {_id: 2, host: \"mongo3:27017\", priority: 1}
+              ]
+            });
+            sleep(5000);
+            rs.status().members.forEach(m => print(m.name + \" -> \" + m.stateStr));
+          } catch(e) {
+            if (e.codeName === \"AlreadyInitialized\") {
+              print(\"Replica set ja configurado\");
+            } else { print(\"Erro: \" + e.message); }
+          }
+        '
+      "

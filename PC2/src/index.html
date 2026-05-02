@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PISID G32 - Gestão de Simulações</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --primary: #3b82f6; --bg: #f8fafc; --sidebar: #0f172a; --white: #ffffff; --text: #334155; --border: #e2e8f0; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; --purple: #8b5cf6; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+        body { background-color: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+
+        /* Login */
+        #login-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); display: flex; justify-content: center; align-items: center; z-index: 9999; transition: opacity 0.4s; }
+        .login-card { background: var(--white); padding: 3rem 2.5rem; border-radius: 20px; width: 100%; max-width: 400px; text-align: center; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); }
+
+        /* Layout */
+        #app-container { display: flex; height: 100vh; opacity: 0; visibility: hidden; transition: opacity 0.5s; }
+        .sidebar { width: 260px; background: var(--sidebar); color: #fff; display: flex; flex-direction: column; padding: 2rem 1.5rem; }
+        .nav-link { padding: 0.85rem 1rem; border-radius: 8px; cursor: pointer; margin-bottom: 0.5rem; color: #94a3b8; font-weight: 500; display: flex; align-items: center; gap: 10px; transition: 0.2s;}
+        .nav-link:hover, .nav-link.active { background: var(--primary); color: #fff; }
+        .content { flex: 1; padding: 2.5rem; overflow-y: auto; }
+
+        /* Cards & UI */
+        .card { background: var(--white); border-radius: 12px; padding: 1.5rem; border: 1px solid var(--border); margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
+        .btn { padding: 0.6rem 1.2rem; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; color: #fff; background: var(--primary); font-size: 0.85rem; transition: 0.2s; }
+        .btn:hover { filter: brightness(0.9); }
+        .btn-success { background: var(--success); }
+        .btn-secondary { background: var(--border); color: var(--text); }
+        .btn-purple { background: var(--purple); }
+        .btn-danger { background: var(--danger); }
+
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th { text-align: left; padding: 1rem; border-bottom: 2px solid var(--border); color: #64748b; }
+        td { padding: 1rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        tr:hover td { background-color: #f8fafc; }
+
+        /* Forms */
+        form label { display: block; margin-bottom: 0.4rem; font-weight: 500; font-size: 0.9rem; }
+        .form-control { width: 100%; padding: 0.75rem; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 1.2rem; background: var(--bg); }
+        .form-control:focus { outline: 2px solid var(--primary); background: #fff; }
+        .form-control[readonly] { background: #e2e8f0; cursor: not-allowed; }
+        .form-row { display: flex; gap: 1rem; }
+        .form-row > div { flex: 1; }
+
+        /* Toasts */
+        #toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 10000; }
+        .toast { background: var(--white); padding: 1rem 1.5rem; border-radius: 8px; margin-top:10px; border-left: 4px solid var(--primary); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); display: flex; gap: 10px; font-weight: 500; font-size: 0.9rem; transition: 0.3s;}
+
+        .badge { padding: 4px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: bold; background: #e2e8f0; color: #334155; }
+        .badge.active { background: #dcfce7; color: #166534; }
+    </style>
+</head>
+<body>
+
+<div id="login-overlay">
+    <div class="login-card">
+        <h2 style="color: var(--sidebar); margin-bottom: 0.5rem;">PISID G32</h2>
+        <p style="color: #64748b; margin-bottom: 2rem; font-size: 0.9rem;">Gestão do Labirinto IoT</p>
+        <form onsubmit="event.preventDefault(); handleLogin();">
+            <input type="text" class="form-control" placeholder="ID Utilizador (ex: 123774)" required>
+            <input type="password" class="form-control" placeholder="Password" required>
+            <button type="submit" class="btn" style="width:100%; padding: 0.8rem;">Iniciar Sessão</button>
+        </form>
+    </div>
+</div>
+
+<div id="toast-container"></div>
+
+<div id="app-container">
+    <aside class="sidebar">
+        <h2 style="margin-bottom: 2rem; letter-spacing: 1px;">PISID <span style="color: var(--primary)">G32</span></h2>
+
+        <div class="nav-link active" onclick="showSection('section-simulacoes', this); carregarSimulacoes();" id="nav-simulacoes">🎮 Simulações</div>
+        <div class="nav-link" onclick="showSection('section-dashboard', this); carregarDashboard();" id="nav-dashboard">📊 Dashboard <span id="dash-badge" class="badge" style="display:none; margin-left:auto;"></span></div>
+        <div class="nav-link" onclick="showSection('section-alertas', this); carregarAlertas();">⚠️ Alertas</div>
+        <div class="nav-link" onclick="showSection('section-utilizadores', this); carregarUtilizadores();">👥 Utilizadores</div>
+        <div class="nav-link" onclick="showSection('section-config', this); carregarConfig();">⚙️ Limites Sensores</div>
+
+        <div class="nav-link" onclick="fazerLogout()" style="margin-top:auto; color:#fca5a5; cursor: pointer;">🚪 Sair da Conta</div>
+    </aside>
+
+    <main class="content">
+
+        <section id="section-simulacoes" class="app-section">
+            <div class="header">
+                <h2>Gestão de Simulações</h2>
+                <button class="btn" onclick="abrirFormSim()">+ Nova Simulação</button>
+            </div>
+            <div class="card">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Equipa</th>
+                        <th>Descrição</th>
+                        <th>Data Início</th>
+                        <th style="text-align: right;">Ações de Jogo</th>
+                    </tr>
+                    </thead>
+                    <tbody id="tb-simulacoes"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="section-dashboard" class="app-section" style="display:none">
+            <div class="header">
+                <div>
+                    <h2 style="display: inline-block; margin-right: 15px;">Monitorização</h2>
+                    <span id="dash-status" class="badge">Nenhuma simulação selecionada</span>
+                </div>
+                <button class="btn btn-secondary" onclick="carregarDashboard()">🔄 Atualizar Agora</button>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+                <div class="card" style="grid-column: span 2;">
+                    <h3 style="margin-bottom: 1rem;">Sensores: Som e Temperatura</h3>
+                    <canvas id="sensorChart" height="80"></canvas>
+                </div>
+                <div class="card" style="grid-column: span 2;">
+                    <h3 style="margin-bottom: 1rem;">Ocupação das Salas</h3>
+                    <table>
+                        <thead><tr><th>Sala</th><th>Marsamis (Even)</th><th>Marsamis (Odd)</th></tr></thead>
+                        <tbody id="tb-ocupacao"></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <section id="section-form-sim" class="app-section" style="display:none">
+            <div class="header">
+                <h2 id="sim-form-title">Criar/Editar Simulação</h2>
+                <button class="btn btn-secondary" onclick="showSection('section-simulacoes', document.getElementById('nav-simulacoes'))">Voltar</button>
+            </div>
+            <div class="card" style="max-width: 600px;">
+                <form onsubmit="event.preventDefault(); saveSimulacao();">
+                    <div class="form-row">
+                        <div><label>ID</label><input type="text" id="sim-id" class="form-control" readonly placeholder="Auto"></div>
+                        <div><label>ID Equipa</label><input type="number" id="sim-equipa" class="form-control" required></div>
+                    </div>
+                    <label>ID Utilizador (Criador)</label>
+                    <input type="number" id="sim-user" class="form-control" required>
+                    <label>Descrição da Simulação</label>
+                    <textarea id="sim-desc" class="form-control" rows="3" required></textarea>
+                    <button type="submit" class="btn">Guardar Simulação</button>
+                </form>
+            </div>
+        </section>
+
+        <section id="section-utilizadores" class="app-section" style="display:none">
+            <div class="header">
+                <h2>Manutenção de Utilizadores</h2>
+                <button class="btn" onclick="abrirFormUser()">+ Novo Utilizador</button>
+            </div>
+            <div class="card">
+                <table>
+                    <thead><tr><th>ID</th><th>Nome</th><th>Equipa</th><th>Tipo</th><th>Ações</th></tr></thead>
+                    <tbody id="tb-utilizadores"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="section-form-user" class="app-section" style="display:none">
+            <div class="header">
+                <h2 id="usr-form-title">Utilizador</h2>
+                <button class="btn btn-secondary" onclick="showSection('section-utilizadores')">Voltar</button>
+            </div>
+            <div class="card" style="max-width: 600px;">
+                <form id="form-user" onsubmit="event.preventDefault(); saveUser();">
+                    <div class="form-row">
+                        <div><label>ID</label><input type="text" id="usr-id" class="form-control" readonly placeholder="Auto"></div>
+                        <div><label>Equipa</label><input type="number" id="usr-equipa" class="form-control" required></div>
+                    </div>
+                    <label>Nome Completo</label>
+                    <input type="text" id="usr-nome" class="form-control" required>
+                    <div class="form-row">
+                        <div><label>Email</label><input type="email" id="usr-email" class="form-control" required></div>
+                        <div><label>Telemóvel</label><input type="text" id="usr-tel" class="form-control"></div>
+                    </div>
+                    <div class="form-row">
+                        <div><label>Tipo</label>
+                            <select id="usr-tipo" class="form-control" required>
+                                <option>Administrador</option><option>Investigador</option><option>Jogador</option>
+                            </select>
+                        </div>
+                        <div><label>Data Nasc.</label><input type="date" id="usr-nasc" class="form-control"></div>
+                    </div>
+                    <button type="submit" class="btn">Guardar Utilizador</button>
+                </form>
+            </div>
+        </section>
+
+        <section id="section-alertas" class="app-section" style="display:none">
+            <div class="header">
+                <h2>Histórico de Alertas</h2>
+                <button class="btn btn-secondary" onclick="carregarAlertas()">🔄 Recarregar</button>
+            </div>
+            <div class="card">
+                <table>
+                    <thead><tr><th>Hora</th><th>Sala</th><th>Tipo Alerta</th><th>Msg</th><th>Leitura</th></tr></thead>
+                    <tbody id="tb-alertas"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="section-config" class="app-section" style="display:none">
+            <div class="header"><h2>Limites Automáticos dos Triggers</h2></div>
+            <div class="card" style="max-width: 500px;">
+                <form onsubmit="event.preventDefault(); guardarConfig();">
+                    <div class="form-row">
+                        <div><label>Temp Máx (ºC)</label><input type="text" id="conf-temp-max" class="form-control"></div>
+                        <div><label>Temp Mín (ºC)</label><input type="text" id="conf-temp-min" class="form-control"></div>
+                    </div>
+                    <label>Ruído Máx (dB)</label><input type="text" id="conf-som-max" class="form-control">
+                    <button type="submit" class="btn">Atualizar DB</button>
+                </form>
+            </div>
+        </section>
+
+    </main>
+</div>
+
+<script>
+    // --- FUNÇÕES UTILITÁRIAS ---
+// --- FUNÇÕES UTILITÁRIAS & SESSÃO ---
+let currentSimulationId = sessionStorage.getItem('sim_id') || null;
+    let autoRefreshDashboard = null; // Variável para guardar o temporizador
+
+    // Arranca a página e verifica se o utilizador já está logado
+    window.onload = () => {
+        if (sessionStorage.getItem('is_logged_in') === 'true') {
+            document.getElementById('login-overlay').style.display = 'none';
+            document.getElementById('app-container').style.visibility = 'visible';
+            document.getElementById('app-container').style.opacity = '1';
+            
+            // Recupera a secção onde o utilizador estava
+            const lastSection = sessionStorage.getItem('last_section') || 'section-simulacoes';
+            const lastNav = sessionStorage.getItem('last_nav') || 'nav-simulacoes';
+            showSection(lastSection, document.getElementById(lastNav));
+            
+            // Se estava no dashboard, recarrega com a etiqueta certa
+            if (lastSection === 'section-dashboard' && currentSimulationId) {
+                document.getElementById('dash-badge').style.display = 'inline-block';
+                document.getElementById('dash-badge').className = 'badge active';
+                document.getElementById('dash-badge').innerText = `Simulação: #${currentSimulationId}`;
+                carregarDashboard();
+            } else if (lastSection === 'section-simulacoes') {
+                carregarSimulacoes();
+            }
+        }
+    };
+
+    function showToast(msg, type='success') {
+        const container = document.getElementById('toast-container');
+        const t = document.createElement('div');
+        t.className = `toast`; t.style.borderLeftColor = type === 'error' ? 'var(--danger)' : 'var(--success)';
+        t.innerHTML = `<span>${type==='error'?'❌':'✅'}</span> <div>${msg}</div>`;
+        container.appendChild(t);
+        setTimeout(() => { t.style.opacity = '0'; setTimeout(()=>t.remove(), 300); }, 3000);
+    }
+
+    function handleLogin() {
+        // Guarda a sessão
+        sessionStorage.setItem('is_logged_in', 'true');
+        document.getElementById('login-overlay').style.opacity = '0';
+        setTimeout(() => {
+            document.getElementById('login-overlay').style.display = 'none';
+            document.getElementById('app-container').style.visibility = 'visible';
+            document.getElementById('app-container').style.opacity = '1';
+            showSection('section-simulacoes', document.getElementById('nav-simulacoes'));
+            carregarSimulacoes();
+        }, 400);
+    }
+
+    function fazerLogout() {
+        sessionStorage.clear(); // Limpa tudo
+        location.reload(); // Atualiza a página (volta ao ecrã de login natural)
+    }
+
+    function showSection(id, navEl = null) {
+        // Guarda a aba atual na sessão
+        sessionStorage.setItem('last_section', id);
+        if(navEl && navEl.id) sessionStorage.setItem('last_nav', navEl.id);
+
+        document.querySelectorAll('.app-section').forEach(s => s.style.display = 'none');
+        document.getElementById(id).style.display = 'block';
+        if(navEl) {
+            document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+            navEl.classList.add('active');
+        }
+
+        // Lógica do Auto-Refresh do Dashboard
+        if (id === 'section-dashboard') {
+            if(!autoRefreshDashboard) autoRefreshDashboard = setInterval(carregarDashboard, 5000); // Atualiza a cada 5s
+        } else {
+            clearInterval(autoRefreshDashboard);
+            autoRefreshDashboard = null;
+        }
+    }
+
+    // ==========================================
+    // 1. LÓGICA DE UTILIZADORES (COMPLETA)
+    // ==========================================
+    let utilizadoresCache = [];
+
+    async function carregarUtilizadores() {
+        try {
+            const res = await fetch('api_utilizadores.php');
+            const data = await res.json();
+            utilizadoresCache = data;
+            document.getElementById('tb-utilizadores').innerHTML = data.map(u =>
+                `<tr>
+                    <td>${u.IDUtilizador}</td><td>${u.Nome}</td><td>Eq. ${u.Equipa}</td><td>${u.Tipo}</td>
+                    <td style="display:flex; gap:5px;">
+                        <button class="btn btn-secondary" onclick="abrirFormUser(${u.IDUtilizador})">Editar</button>
+                        <button class="btn btn-danger" onclick="apagarUser(${u.IDUtilizador})">Apagar</button>
+                    </td>
+                </tr>`
+            ).join('');
+        } catch(e) { showToast('Erro ao carregar utilizadores.', 'error'); }
+    }
+
+    function abrirFormUser(id = null) {
+        if(id) {
+            const u = utilizadoresCache.find(x => parseInt(x.IDUtilizador) === id);
+            document.getElementById('usr-id').value = u.IDUtilizador;
+            document.getElementById('usr-equipa').value = u.Equipa;
+            document.getElementById('usr-equipa').readOnly = true; // Mantém integridade
+            document.getElementById('usr-nome').value = u.Nome;
+            document.getElementById('usr-email').value = u.Email;
+            document.getElementById('usr-tel').value = u.Telemovel;
+            document.getElementById('usr-tipo').value = u.Tipo;
+            document.getElementById('usr-nasc').value = u.DataNascimento;
+            document.getElementById('usr-form-title').innerText = "Editar Utilizador #" + id;
+        } else {
+            document.getElementById('form-user').reset();
+            document.getElementById('usr-id').value = '';
+            document.getElementById('usr-equipa').readOnly = false;
+            document.getElementById('usr-form-title').innerText = "Novo Utilizador";
+        }
+        showSection('section-form-user');
+    }
+
+    async function saveUser() {
+        const payload = {
+            id: document.getElementById('usr-id').value,
+            equipa: document.getElementById('usr-equipa').value,
+            nome: document.getElementById('usr-nome').value,
+            telemovel: document.getElementById('usr-tel').value,
+            tipo: document.getElementById('usr-tipo').value,
+            email: document.getElementById('usr-email').value,
+            data_nascimento: document.getElementById('usr-nasc').value
+        };
+        const method = payload.id ? 'PUT' : 'POST';
+
+        try {
+            const res = await fetch('api_utilizadores.php', { method: method, body: JSON.stringify(payload) });
+            const data = await res.json();
+            if(data.erro) throw new Error(data.erro);
+            showToast(data.sucesso);
+            showSection('section-utilizadores');
+            carregarUtilizadores();
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    async function apagarUser(id) {
+        if(!confirm('Tem a certeza que deseja apagar este utilizador?')) return;
+        try {
+            const res = await fetch('api_utilizadores.php', { method: 'DELETE', body: JSON.stringify({id: id})});
+            const data = await res.json();
+            if(data.erro) throw new Error(data.erro);
+            showToast(data.sucesso);
+            carregarUtilizadores();
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    // ==========================================
+    // 2. LÓGICA DE SIMULAÇÕES
+    // ==========================================
+    let simulacoesCache = [];
+
+    async function carregarSimulacoes() {
+        try {
+            const res = await fetch('api_simulacoes.php');
+            const data = await res.json();
+            simulacoesCache = data;
+
+            document.getElementById('tb-simulacoes').innerHTML = data.map(s => `
+                <tr>
+                    <td><strong>#${s.IDSimulacao}</strong></td><td>Eq. ${s.IDEquipa}</td>
+                    <td>${s.Descricao}</td><td>${s.DataHoraInicio}</td>
+                    <td style="text-align: right; display: flex; justify-content: flex-end; gap: 8px;">
+                        <button class="btn btn-secondary" onclick="abrirFormSim(${s.IDSimulacao})" title="Editar">✏️ Editar</button>
+                        <button class="btn btn-purple" onclick="verHistorico(${s.IDSimulacao})" title="Dados">📊 Dados</button>
+                        <button class="btn btn-success" onclick="iniciarJogo(${s.IDSimulacao})" title="Iniciar">▶️ Iniciar</button>
+                    </td>
+                </tr>
+            `).join('');
+        } catch(e) { showToast('Erro de ligação à BD.', 'error'); }
+    }
+
+    function abrirFormSim(id = null) {
+        const formTitle = document.getElementById('sim-form-title');
+        const equipaInp = document.getElementById('sim-equipa');
+        const userInp = document.getElementById('sim-user');
+
+        if(id) {
+            const s = simulacoesCache.find(x => parseInt(x.IDSimulacao) === id);
+            document.getElementById('sim-id').value = s.IDSimulacao;
+            equipaInp.value = s.IDEquipa; equipaInp.readOnly = true;
+            userInp.value = s.IDUtilizador; userInp.readOnly = true;
+            document.getElementById('sim-desc').value = s.Descricao;
+            formTitle.innerText = "✏️ Editar Simulação #" + id;
+        } else {
+            document.getElementById('sim-id').value = '';
+            equipaInp.value = ''; equipaInp.readOnly = false;
+            userInp.value = ''; userInp.readOnly = false;
+            document.getElementById('sim-desc').value = '';
+            formTitle.innerText = "✨ Criar Nova Simulação";
+        }
+        showSection('section-form-sim');
+    }
+
+    async function saveSimulacao() {
+        const payload = {
+            id: document.getElementById('sim-id').value,
+            id_equipa: document.getElementById('sim-equipa').value,
+            id_utilizador: document.getElementById('sim-user').value,
+            descricao: document.getElementById('sim-desc').value
+        };
+        const method = payload.id ? 'PUT' : 'POST';
+
+        try {
+            const res = await fetch('api_simulacoes.php', { method: method, body: JSON.stringify(payload) });
+            const data = await res.json();
+            if(data.erro) throw new Error(data.erro);
+            showToast(data.sucesso);
+            showSection('section-simulacoes', document.getElementById('nav-simulacoes'));
+            carregarSimulacoes();
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    function iniciarJogo(id) {
+        currentSimulationId = id;
+        sessionStorage.setItem('sim_id', id); // Guarda na sessão
+        document.getElementById('dash-badge').style.display = 'inline-block';
+        document.getElementById('dash-badge').className = 'badge active';
+        document.getElementById('dash-badge').innerText = `Ativa: #${id}`;
+        document.getElementById('dash-status').className = 'badge active';
+        document.getElementById('dash-status').innerText = `🔴 Live: Simulação #${id}`;
+        showSection('section-dashboard', document.getElementById('nav-dashboard'));
+        carregarDashboard();
+    }
+
+    function verHistorico(id) {
+        currentSimulationId = id;
+        sessionStorage.setItem('sim_id', id); // Guarda na sessão
+        document.getElementById('dash-badge').style.display = 'inline-block';
+        document.getElementById('dash-badge').className = 'badge';
+        document.getElementById('dash-badge').innerText = `Histórico: #${id}`;
+        document.getElementById('dash-status').className = 'badge';
+        document.getElementById('dash-status').innerText = `📜 Histórico: Simulação #${id}`;
+        showSection('section-dashboard', document.getElementById('nav-dashboard'));
+        carregarDashboard();
+    }
+
+    // ==========================================
+    // 3. DASHBOARD, ALERTAS E CONFIGS
+    // ==========================================
+    let sensorChart;
+    async function carregarDashboard() {
+        if(!currentSimulationId) {
+            document.getElementById('tb-ocupacao').innerHTML = `<tr><td colspan="3" style="text-align:center;">Selecione uma simulação primeiro.</td></tr>`;
+            return;
+        }
+        try {
+            const res = await fetch(`api_dashboard.php?id=${currentSimulationId}`);
+            const data = await res.json();
+            if(data.erro) throw new Error(data.erro);
+
+            document.getElementById('tb-ocupacao').innerHTML = data.ocupacao.map(o =>
+                `<tr><td>${o.IDSala}</td><td>${o.NumeroMarsamisEven}</td><td>${o.NumeroMarsamisOdd}</td></tr>`
+            ).join('');
+
+            // CORREÇÃO: t.Hora ? ... : '--:--:--' previne erros com valores nulos da Base de Dados!
+            const labels = data.temperaturas.map(t => t.Hora ? t.Hora.split(' ')[1] : '--:--:--');
+            const temps = data.temperaturas.map(t => parseFloat(t.Temperatura));
+            const sons = data.sons.map(s => parseFloat(s.Som));
+
+            if(sensorChart) sensorChart.destroy();
+            const ctx = document.getElementById('sensorChart').getContext('2d');
+            sensorChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label: 'Temp (ºC)', data: temps, borderColor: '#ef4444', tension: 0.1 },
+                        { label: 'Som (dB)', data: sons, borderColor: '#3b82f6', tension: 0.1 }
+                    ]
+                },
+                options: { animation: false } // Desliga a animação para não piscar no auto-refresh
+            });
+        } catch(e) { console.log('A aguardar dados reais para este ID...'); }
+    }
+    async function carregarAlertas() {
+        try {
+            const res = await fetch('api_alertas.php');
+            const data = await res.json();
+            document.getElementById('tb-alertas').innerHTML = data.map(a =>
+                `<tr><td>${a.Hora}</td><td>${a.IDSala}</td><td><b>${a.TipoAlerta}</b></td><td>${a.Msg}</td><td>${a.Leitura || '-'}</td></tr>`
+            ).join('');
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    async function carregarConfig() {
+        try {
+            const res = await fetch('api_config.php');
+            const data = await res.json();
+            if(data.temp) {
+                document.getElementById('conf-temp-max').value = data.temp.maximo;
+                document.getElementById('conf-temp-min').value = data.temp.minimo;
+            }
+            if(data.som) document.getElementById('conf-som-max').value = data.som.maximo;
+        } catch(e) {}
+    }
+
+    async function guardarConfig() {
+        const payload = {
+            temp_max: document.getElementById('conf-temp-max').value,
+            temp_min: document.getElementById('conf-temp-min').value,
+            som_max: document.getElementById('conf-som-max').value
+        };
+        try {
+            const res = await fetch('api_config.php', { method: 'POST', body: JSON.stringify(payload) });
+            const data = await res.json();
+            if(data.erro) throw new Error(data.erro);
+            showToast(data.sucesso);
+        } catch(e) { showToast(e.message, 'error'); }
+    }
+</script>
+</body>
+</html>

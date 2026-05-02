@@ -1,0 +1,16 @@
+# Dados gerados em runtime - nunca commitar
+mysql_data/
+*.json
+!package.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Android build
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/
