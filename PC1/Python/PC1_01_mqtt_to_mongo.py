@@ -29,7 +29,6 @@ import paho.mqtt.client as mqtt
 from pymongo import MongoClient
 from pymongo.write_concern import WriteConcern
 
-
 # ─── CONFIGURAÇÃO ─────────────────────────────────────────────────────────────
 
 BROKER = "broker.emqx.io"   # broker público MQTT
@@ -44,28 +43,30 @@ MONGO_HOSTS = [              # PC1 — réplicas locais
 
 FALLBACK_FILE = Path(__file__).parent / "mqtt_fallback.json"
 
-# Limites físicos absolutos — rejeição imediata (dados anómalos, não outliers)
-# Valores fisicamente impossíveis para um labirinto interior
-TEMP_MIN, TEMP_MAX = -10.0, 80.0   # ºC
-SOM_MIN,  SOM_MAX  =   0.0, 200.0  # dB
-
-# Outlier estatístico — Z-score: se |valor - média| / desvio_padrão > Z_THRESHOLD → outlier
-# Não usamos valor fixo: o critério adapta-se ao desvio real dos dados
-# Z=2.5 significa: rejeita valores a mais de 2.5 desvios padrão da média
+# Detecção de outliers em dois critérios combinados:
+#   a) |valor - último válido| > DELTA_MAX → variação brusca → verifica Z-score
+#   b) Z-score > Z_THRESHOLD               → estatisticamente anómalo
+# Ambos têm de ser verdade para rejeitar. Subidas graduais (delta ≤ DELTA_MAX)
+# são sempre aceites, independentemente do Z-score.
+# Sem limites fixos — o delta+Z-score é suficiente para qualquer sensor.
+DELTA_MAX      = 7.0
 Z_THRESHOLD    = 2.5
-JANELA_TAMANHO = 20         # últimas N leituras para calcular média e desvio
+JANELA_TAMANHO = 20
 
 # ─── ESTADO GLOBAL ────────────────────────────────────────────────────────────
 
 _client_mongo  = None        # cliente MongoClient ativo
 _porta_atual   = None
 _fila_fallback = []          # msgs em espera quando Mongo indisponível
-_write_concern = WriteConcern(w="majority")
 
-# janelas deslizantes independentes por sensor
+# Janelas deslizantes para Z-score (só recebem valores válidos)
 _janela_som  = deque(maxlen=JANELA_TAMANHO)
 _janela_temp = deque(maxlen=JANELA_TAMANHO)
+# Última leitura válida — para calcular o delta
+_ultimo_som_valido  = None
+_ultimo_temp_valido = None
 
+_write_concern = WriteConcern(w="majority")
 
 # ─── FALLBACK EM FICHEIRO ──────────────────────────────────────────────────────
 
@@ -80,14 +81,12 @@ def _carregar_fila():
         except Exception:
             _fila_fallback = []
 
-
 def _guardar_fila():
     try:
         with open(FALLBACK_FILE, "w", encoding="utf-8") as f:
             json.dump(_fila_fallback, f, ensure_ascii=False, indent=0)
     except Exception:
         pass
-
 
 # ─── LIGAÇÃO MONGODB COM FAILOVER ─────────────────────────────────────────────
 
@@ -122,7 +121,6 @@ def _get_db(grupo: int):
 
     raise ConnectionError("MongoDB completamente indisponível.")
 
-
 # ─── VALIDAÇÃO DE DADOS ANÓMALOS ──────────────────────────────────────────────
 
 def _parse_float(v):
@@ -131,7 +129,6 @@ def _parse_float(v):
         return float(v)
     except (TypeError, ValueError):
         return None
-
 
 def _data_valida(s: str) -> bool:
     """Verifica se uma string de data/hora é plausível."""
@@ -149,73 +146,109 @@ def _data_valida(s: str) -> bool:
     except ValueError:
         return False
 
+def _iqr_outlier(valor: float, janela: deque) -> bool:
+    """
+    Detecta outlier pelo método IQR (Interquartile Range).
+    Só activa quando a janela tem pelo menos 5 leituras válidas.
+    outlier se valor < Q1 - 1.5*IQR  ou  valor > Q3 + 1.5*IQR
+    """
+    if len(janela) < 5:
+        return False   # amostras insuficientes — aceita sem avaliar
+    dados = sorted(janela)
+    n     = len(dados)
+    q1    = dados[n // 4]
+    q3    = dados[(3 * n) // 4]
+    iqr   = q3 - q1
+    if iqr == 0:
+        return False   # todos os valores iguais — não há desvio para avaliar
+    return valor < (q1 - IQR_FATOR * iqr) or valor > (q3 + IQR_FATOR * iqr)
 
-def _stats_janela(janela: deque) -> tuple[float, float] | None:
-    """Devolve (média, desvio_padrão) ou None se janela insuficiente."""
+def _zscore_outlier(valor: float, janela: deque) -> tuple[bool, float, float]:
+    """
+    Z-score sobre a janela de leituras válidas.
+    Devolve (é_outlier, média, desvio_padrão).
+    """
     n = len(janela)
     if n < 5:
-        return None   # amostras insuficientes para estatística fiável
+        return False, 0.0, 0.0
     media = sum(janela) / n
-    variancia = sum((x - media) ** 2 for x in janela) / n
-    std = math.sqrt(variancia)
-    return media, std if std > 0 else 0.1  # evita divisão por zero
+    std   = math.sqrt(sum((x - media) ** 2 for x in janela) / n)
+    std   = max(std, 0.01)
+    z     = abs(valor - media) / std
+    return z > Z_THRESHOLD, media, std
 
+def _e_outlier(valor: float, ultimo_valido, janela: deque) -> tuple[bool, str]:
+    """
+    Nível 2 — Delta + Z-score.
+    - Se delta ≤ DELTA_MAX: aceita sempre (subida gradual legítima).
+    - Se delta > DELTA_MAX E Z-score > threshold: outlier.
+    - Se delta > DELTA_MAX mas Z-score ok: aceita (variação brusca mas estatisticamente plausível).
+    Devolve (é_outlier, mensagem_debug).
+    """
+    if ultimo_valido is None:
+        return False, ""
+
+    delta = abs(valor - ultimo_valido)
+
+    if delta <= DELTA_MAX:
+        return False, ""  # subida gradual — aceita sem verificar Z-score
+
+    # Delta grande — verifica Z-score
+    is_z, media, std = _zscore_outlier(valor, janela)
+    if is_z:
+        z = abs(valor - media) / std
+        return True, (f"valor={valor:.2f} | delta={delta:.2f} > {DELTA_MAX} "
+                      f"e z={z:.1f} > {Z_THRESHOLD} | "
+                      f"média={media:.2f} std={std:.2f}")
+    return False, ""  # delta grande mas Z-score ok — aceita
 
 def _validar_som(valor_raw) -> tuple:
     """
-    1. Rejeita dados anómalos (tipo errado ou fora de limites físicos).
-    2. Rejeita outliers estatísticos via Z-score (|z| > Z_THRESHOLD).
-    Retorna (valor_float, True) se válido, ou (None, False) caso contrário.
+    Rejeita tipo de dados errado.
+    Rejeita outliers via Delta + Z-score:
+      - delta ≤ 7  → aceita sempre (subida gradual)
+      - delta > 7  E Z-score > 2.5 → outlier
+    Sem limites fixos — funciona para qualquer escala de sensor.
     """
+    global _ultimo_som_valido
+
     v = _parse_float(valor_raw)
     if v is None:
         print(f"[Anomalia som] valor não numérico: {valor_raw!r}")
         return None, False
-    if not (SOM_MIN <= v <= SOM_MAX):
-        print(f"[Anomalia som] fora de limites físicos [{SOM_MIN}, {SOM_MAX}]: {v}")
+
+    is_out, msg = _e_outlier(v, _ultimo_som_valido, _janela_som)
+    if is_out:
+        print(f"[Outlier som] {msg}")
         return None, False
 
-    # Outlier estatístico — Z-score
-    stats = _stats_janela(_janela_som)
-    if stats is not None:
-        media, std = stats
-        z = abs(v - media) / std
-        if z > Z_THRESHOLD:
-            print(f"[Outlier som] z={z:.1f} > {Z_THRESHOLD} | valor={v} média={media:.1f} std={std:.2f}")
-            _janela_som.append(v)
-            return None, False
-
     _janela_som.append(v)
+    _ultimo_som_valido = v
     return v, True
-
 
 def _validar_temperatura(valor_raw) -> tuple:
     """
-    1. Rejeita dados anómalos (tipo errado ou fora de limites físicos).
-    2. Rejeita outliers estatísticos via Z-score (|z| > Z_THRESHOLD).
-    Retorna (valor_float, True) se válido, ou (None, False) caso contrário.
+    Rejeita tipo de dados errado.
+    Rejeita outliers via Delta + Z-score:
+      - delta ≤ 7  → aceita sempre (subida gradual)
+      - delta > 7  E Z-score > 2.5 → outlier
+    Sem limites fixos — funciona para qualquer escala de sensor.
     """
+    global _ultimo_temp_valido
+
     v = _parse_float(valor_raw)
     if v is None:
         print(f"[Anomalia temp] valor não numérico: {valor_raw!r}")
         return None, False
-    if not (TEMP_MIN <= v <= TEMP_MAX):
-        print(f"[Anomalia temp] fora de limites físicos [{TEMP_MIN}, {TEMP_MAX}]: {v}")
+
+    is_out, msg = _e_outlier(v, _ultimo_temp_valido, _janela_temp)
+    if is_out:
+        print(f"[Outlier temp] {msg}")
         return None, False
 
-    # Outlier estatístico — Z-score
-    stats = _stats_janela(_janela_temp)
-    if stats is not None:
-        media, std = stats
-        z = abs(v - media) / std
-        if z > Z_THRESHOLD:
-            print(f"[Outlier temp] z={z:.1f} > {Z_THRESHOLD} | valor={v} média={media:.1f} std={std:.2f}")
-            _janela_temp.append(v)
-            return None, False
-
     _janela_temp.append(v)
+    _ultimo_temp_valido = v
     return v, True
-
 
 # ─── INSERÇÃO NAS COLEÇÕES MONGO ──────────────────────────────────────────────
 
@@ -250,7 +283,6 @@ def _inserir(db, topic: str, data: dict):
         }
         db["Movimento"].with_options(write_concern=wc).insert_one(doc)
 
-
     elif "mazetemp" in topic:
         player = data.get("Player")
         hora   = data.get("Hour", data.get("Hora", datetime.now().isoformat()))
@@ -269,7 +301,6 @@ def _inserir(db, topic: str, data: dict):
         }
         db["temperatura"].with_options(write_concern=wc).insert_one(doc)
 
-
     elif "mazesound" in topic:
         player = data.get("Player")
         hora   = data.get("Hour", data.get("Hora", datetime.now().isoformat()))
@@ -287,8 +318,6 @@ def _inserir(db, topic: str, data: dict):
             "Sound":  valor,
         }
         db["Som"].with_options(write_concern=wc).insert_one(doc)
-
-
 
 # ─── PROCESSAMENTO DA FILA DE FALLBACK ────────────────────────────────────────
 
@@ -315,7 +344,6 @@ def _processar_fila(grupo: int):
         print(f"[Fallback] {recuperados} msgs recuperadas" +
               (f", {len(restantes)} ainda pendentes" if restantes else "."))
 
-
 # ─── CALLBACKS MQTT ───────────────────────────────────────────────────────────
 
 def on_connect(c, userdata, flags, reason_code, properties=None):
@@ -327,11 +355,9 @@ def on_connect(c, userdata, flags, reason_code, properties=None):
     else:
         print(f"[MQTT] Falha na ligação (código {reason_code})")
 
-
 def on_disconnect(c, userdata, disconnect_flags, reason_code, properties=None):
     if reason_code != 0:
         print(f"[MQTT] Desconectado (código {reason_code}) — reconexão automática...")
-
 
 def on_message(c, userdata, msg):
     grupo = userdata["grupo"]
@@ -364,7 +390,6 @@ def on_message(c, userdata, msg):
     _fila_fallback.append({"topic": msg.topic, "data": data})
     _guardar_fila()
     print(f"[Fallback] {len(_fila_fallback)} msgs em fila (insert falhou).")
-
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
@@ -413,7 +438,6 @@ def main():
     finally:
         c.disconnect()
         print("[MQTT] Desligado.")
-
 
 if __name__ == "__main__":
     main()
