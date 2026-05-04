@@ -14,9 +14,11 @@ MAX_GATILHOS_POR_SALA = 3
 
 class GatilhoOddEven:
 
-    def __init__(self, grupo: int, mqtt_client):
-        self._grupo = grupo
-        self._mqtt  = mqtt_client
+    def __init__(self, grupo: int, mqtt_client, db_conn=None, id_simulacao=1):
+        self._grupo        = grupo
+        self._mqtt         = mqtt_client
+        self._db_conn      = db_conn
+        self._id_simulacao = id_simulacao
         self._salas: dict[int, dict] = {}
         print(f"[odd/even] Tracker ativo (max {MAX_GATILHOS_POR_SALA} gatilhos/sala)", flush=True)
 
@@ -85,6 +87,20 @@ class GatilhoOddEven:
             print(f"  [odd/even] Sala {sala_id}: odd={odd} == even={even} → Score! ({s['gatilhos']}/{MAX_GATILHOS_POR_SALA})", flush=True)
         except Exception as e:
             print(f"  [odd/even] Erro ao enviar Score sala {sala_id}: {e}", flush=True)
+
+        # Guardar pontuação no histórico local
+        if self._db_conn:
+            try:
+                cur = self._db_conn.cursor()
+                cur.execute(
+                    "INSERT INTO pontuacoes (IDSimulacao, IDSala, Hora) VALUES (%s, %s, NOW(6))",
+                    (self._id_simulacao, sala_id)
+                )
+                self._db_conn.commit()
+                cur.close()
+                print(f"  [odd/even] Pontuação guardada — Sala {sala_id}", flush=True)
+            except Exception as e:
+                print(f"  [odd/even] Erro ao guardar pontuação: {e}", flush=True)
 
     def imprimir_estado(self):
         if not self._salas:
