@@ -217,52 +217,58 @@ CREATE TRIGGER Atualizar_Ocupacao_Labirinto
 AFTER INSERT ON medicoespassagens
 FOR EACH ROW
 BEGIN
-    -- Atualiza sala de DESTINO: adiciona marsami
-    INSERT INTO ocupacaolabirinto (IDSimulacao, IDSala, DataCriacao, NumeroMarsamisEven, NumeroMarsamisOdd)
-    SELECT
-        NEW.IDSimulacao,
-        NEW.IDSalaDestino,
-        NOW(),
-        SUM(CASE WHEN m.Marsami % 2 = 0 THEN 1 ELSE 0 END),
-        SUM(CASE WHEN m.Marsami % 2 != 0 THEN 1 ELSE 0 END)
-    FROM (
-        -- Marsamis que chegaram ao destino (incluindo o novo)
-        SELECT Marsami FROM medicoespassagens
-         WHERE IDSimulacao = NEW.IDSimulacao
-           AND IDSalaDestino = NEW.IDSalaDestino
-           AND IDMedicao <= NEW.IDMedicao
-        -- Menos os que saíram desta sala
-        UNION ALL
-        SELECT -Marsami FROM medicoespassagens
-         WHERE IDSimulacao = NEW.IDSimulacao
-           AND IDSalaOrigem = NEW.IDSalaDestino
-           AND IDMedicao <= NEW.IDMedicao
-           AND IDSalaOrigem > 0
-    ) base
-    -- Conta só os que ainda estão (chegaram mais vezes do que saíram)
-    GROUP BY 1
-    HAVING COUNT(*) > 0;
+    DECLARE v_even_dest INT DEFAULT 0;
+    DECLARE v_odd_dest  INT DEFAULT 0;
+    DECLARE v_even_orig INT DEFAULT 0;
+    DECLARE v_odd_orig  INT DEFAULT 0;
 
-    -- Atualiza sala de ORIGEM: remove marsami (só se não for largada inicial)
+    -- ── Recalcula ocupação da sala de DESTINO ──────────────────────────────
+    -- Conta marsamis que chegaram a esta sala e ainda não saíram
+    SELECT
+        SUM(CASE WHEN Marsami % 2 = 0 THEN 1 ELSE 0 END),
+        SUM(CASE WHEN Marsami % 2 != 0 THEN 1 ELSE 0 END)
+    INTO v_even_dest, v_odd_dest
+    FROM medicoespassagens
+    WHERE IDSimulacao    = NEW.IDSimulacao
+      AND IDSalaDestino  = NEW.IDSalaDestino
+      AND IDMedicao     <= NEW.IDMedicao
+      AND Marsami NOT IN (
+          SELECT Marsami FROM medicoespassagens
+           WHERE IDSimulacao  = NEW.IDSimulacao
+             AND IDSalaOrigem = NEW.IDSalaDestino
+             AND IDMedicao   <= NEW.IDMedicao
+             AND IDSalaOrigem > 0
+      );
+
+    INSERT INTO ocupacaolabirinto
+        (IDSimulacao, IDSala, DataCriacao, NumeroMarsamisEven, NumeroMarsamisOdd)
+    VALUES
+        (NEW.IDSimulacao, NEW.IDSalaDestino, NOW(),
+         IFNULL(v_even_dest, 0), IFNULL(v_odd_dest, 0));
+
+    -- ── Recalcula ocupação da sala de ORIGEM (se não for largada) ──────────
     IF NEW.IDSalaOrigem > 0 THEN
-        INSERT INTO ocupacaolabirinto (IDSimulacao, IDSala, DataCriacao, NumeroMarsamisEven, NumeroMarsamisOdd)
         SELECT
-            NEW.IDSimulacao,
-            NEW.IDSalaOrigem,
-            NOW(),
-            SUM(CASE WHEN m2.Marsami % 2 = 0 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN m2.Marsami % 2 != 0 THEN 1 ELSE 0 END)
-        FROM medicoespassagens m2
-        WHERE m2.IDSimulacao = NEW.IDSimulacao
-          AND m2.IDSalaDestino = NEW.IDSalaOrigem
-          AND m2.IDMedicao < NEW.IDMedicao
-          AND m2.Marsami NOT IN (
+            SUM(CASE WHEN Marsami % 2 = 0 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN Marsami % 2 != 0 THEN 1 ELSE 0 END)
+        INTO v_even_orig, v_odd_orig
+        FROM medicoespassagens
+        WHERE IDSimulacao    = NEW.IDSimulacao
+          AND IDSalaDestino  = NEW.IDSalaOrigem
+          AND IDMedicao      < NEW.IDMedicao
+          AND Marsami NOT IN (
               SELECT Marsami FROM medicoespassagens
-               WHERE IDSimulacao = NEW.IDSimulacao
+               WHERE IDSimulacao  = NEW.IDSimulacao
                  AND IDSalaOrigem = NEW.IDSalaOrigem
-                 AND IDMedicao <= NEW.IDMedicao
+                 AND IDMedicao   <= NEW.IDMedicao
                  AND IDSalaOrigem > 0
           );
+
+        INSERT INTO ocupacaolabirinto
+            (IDSimulacao, IDSala, DataCriacao, NumeroMarsamisEven, NumeroMarsamisOdd)
+        VALUES
+            (NEW.IDSimulacao, NEW.IDSalaOrigem, NOW(),
+             IFNULL(v_even_orig, 0), IFNULL(v_odd_orig, 0));
     END IF;
 END$$
 DELIMITER ;
