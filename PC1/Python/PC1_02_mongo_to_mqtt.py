@@ -4,17 +4,25 @@ PC1 — MongoDB → MQTT (Grupo 32)
 Lê incrementalmente as coleções MongoDB e publica no broker MQTT.
 Usa checkpoint por _id para nunca reenviar o mesmo documento.
 
-Tópicos publicados:
-  pisid_mig_mov_32   — movimentos
-  pisid_mig_temp_32  — temperaturas
-  pisid_mig_sound_32 — som
+Deteção de outliers ANTES de publicar (movida do PC1_01):
+  - MongoDB contém os dados RAW completos (útil para auditoria)
+  - Só chegam ao MySQL dados limpos (outliers filtrados aqui)
+  - Estado das janelas é reiniciado entre simulações (quando o checkpoint
+    é resetado ou quando detetamos o início de uma nova largada)
 
-Uso: python mongo_to_mqtt.py [grupo]
+Tópicos publicados:
+  pisid_mig_mov_32   — movimentos (todos, sem filtro)
+  pisid_mig_temp_32  — temperaturas (outliers filtrados)
+  pisid_mig_sound_32 — som (outliers filtrados)
+
+Uso: python PC1_02_mongo_to_mqtt.py [grupo]
 """
 
 import json
+import math
 import sys
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +34,7 @@ from pymongo.write_concern import WriteConcern
 # ─── CONFIGURAÇÃO ─────────────────────────────────────────────────────────────
 
 GRUPO        = 32
-BROKER       = "broker.emqx.io"
+BROKER       = "broker.mqtt-dashboard.com"
 PORT         = 1883
 INTERVALO_SEG = 0.1        # periodicidade de leitura do Mongo
 LOTE_MAX_NORMAL   = 20    # regime normal (ciclos rápidos de 0.1s)
@@ -44,6 +52,11 @@ MONGO_HOSTS = [
 
 CHECKPOINT_FILE = Path(__file__).parent / "mongo_mqtt_checkpoint.json"
 
+# Outlier detection (Delta + Z-score)
+DELTA_MAX      = 7.0
+Z_THRESHOLD    = 2.5
+JANELA_TAMANHO = 20
+
 # ─── ESTADO GLOBAL ────────────────────────────────────────────────────────────
 
 _mqtt_client   = None
@@ -52,6 +65,81 @@ _porta_mongo   = None
 
 # contadores para log
 _total = {"Movimento": 0, "temperatura": 0, "Som": 0}
+_outliers_filtrados = {"temperatura": 0, "Som": 0}
+
+# Estado de outlier detection — reiniciado entre simulações
+_janela_temp        = deque(maxlen=JANELA_TAMANHO)
+_janela_som         = deque(maxlen=JANELA_TAMANHO)
+_ultimo_temp_valido = None
+_ultimo_som_valido  = None
+
+
+# ─── OUTLIER DETECTION ───────────────────────────────────────────────────────
+
+def _reset_outlier_state():
+    """Reinicia as janelas de outlier entre simulações."""
+    global _janela_temp, _janela_som, _ultimo_temp_valido, _ultimo_som_valido
+    _janela_temp        = deque(maxlen=JANELA_TAMANHO)
+    _janela_som         = deque(maxlen=JANELA_TAMANHO)
+    _ultimo_temp_valido = None
+    _ultimo_som_valido  = None
+    print("[Outlier] Janelas reiniciadas.", flush=True)
+
+
+def _zscore(valor: float, janela: deque) -> tuple[bool, float, float]:
+    n = len(janela)
+    if n < 5:
+        return False, 0.0, 0.0
+    media = sum(janela) / n
+    std   = math.sqrt(sum((x - media) ** 2 for x in janela) / n)
+    std   = max(std, 0.01)
+    z     = abs(valor - media) / std
+    return z > Z_THRESHOLD, media, std
+
+
+def _e_outlier_temp(valor: float) -> bool:
+    global _ultimo_temp_valido
+    if _ultimo_temp_valido is None:
+        _janela_temp.append(valor)
+        _ultimo_temp_valido = valor
+        return False
+    delta = abs(valor - _ultimo_temp_valido)
+    if delta <= DELTA_MAX:
+        _janela_temp.append(valor)
+        _ultimo_temp_valido = valor
+        return False
+    is_z, media, std = _zscore(valor, _janela_temp)
+    if is_z:
+        z = abs(valor - media) / std
+        print(f"[Outlier temp] valor={valor:.2f} | delta={delta:.2f} > {DELTA_MAX} "
+              f"e z={z:.1f} > {Z_THRESHOLD} | média={media:.2f} std={std:.2f}", flush=True)
+        return True
+    # Delta grande mas z-score ok — aceite, atualiza janela
+    _janela_temp.append(valor)
+    _ultimo_temp_valido = valor
+    return False
+
+
+def _e_outlier_som(valor: float) -> bool:
+    global _ultimo_som_valido
+    if _ultimo_som_valido is None:
+        _janela_som.append(valor)
+        _ultimo_som_valido = valor
+        return False
+    delta = abs(valor - _ultimo_som_valido)
+    if delta <= DELTA_MAX:
+        _janela_som.append(valor)
+        _ultimo_som_valido = valor
+        return False
+    is_z, media, std = _zscore(valor, _janela_som)
+    if is_z:
+        z = abs(valor - media) / std
+        print(f"[Outlier som] valor={valor:.2f} | delta={delta:.2f} > {DELTA_MAX} "
+              f"e z={z:.1f} > {Z_THRESHOLD} | média={media:.2f} std={std:.2f}", flush=True)
+        return True
+    _janela_som.append(valor)
+    _ultimo_som_valido = valor
+    return False
 
 
 # ─── CHECKPOINT ───────────────────────────────────────────────────────────────
@@ -211,6 +299,10 @@ def _run_ciclo(grupo: int):
     for doc in docs:
         payload = _validar_temperatura(doc)
         if payload:
+            valor = payload["Temperature"]
+            if _e_outlier_temp(valor):
+                _outliers_filtrados["temperatura"] += 1
+                continue   # ← outlier: não publica no MQTT
             _publicar(topic_temp, payload)
             n += 1
     if docs:
@@ -228,6 +320,10 @@ def _run_ciclo(grupo: int):
     for doc in docs:
         payload = _validar_som(doc)
         if payload:
+            valor = payload["Sound"]
+            if _e_outlier_som(valor):
+                _outliers_filtrados["Som"] += 1
+                continue   # ← outlier: não publica no MQTT
             _publicar(topic_som, payload)
             n += 1
     if docs:
@@ -275,6 +371,12 @@ def main():
     time.sleep(2)  # aguarda ligação inicial
 
     print("A iniciar ciclo de migração. Ctrl+C para parar.\n", flush=True)
+
+    ultimo_checkpoint_vazio = _carregar_checkpoint() == {"Movimento": None, "temperatura": None, "Som": None}
+    if ultimo_checkpoint_vazio:
+        print("[Outlier] Checkpoint vazio — janelas reiniciadas para nova simulação.", flush=True)
+        _reset_outlier_state()
+
     while True:
         try:
             _run_ciclo(grupo)
@@ -290,6 +392,8 @@ def main():
     print("\n[Ctrl+C] A encerrar...", flush=True)
     _mqtt_client.loop_stop()
     _mqtt_client.disconnect()
+    print(f"Publicados  — Mov:{_total['Movimento']} Temp:{_total['temperatura']} Som:{_total['Som']}", flush=True)
+    print(f"Filtrados   — Temp:{_outliers_filtrados['temperatura']} Som:{_outliers_filtrados['Som']}", flush=True)
 
 
 if __name__ == "__main__":

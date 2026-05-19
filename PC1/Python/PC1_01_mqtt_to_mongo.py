@@ -6,22 +6,23 @@ nas coleções MongoDB (labirinto_32).
 
 Validações feitas ANTES de inserir no Mongo:
   - Dados anómalos: tipos errados, datas inválidas, campos nulos
-  - Outliers de som/temperatura: valores acima de 36 dB/ºC de variação
-    brusca ou fora de limites físicos
 
 Tolerância a falhas:
   - Failover automático entre mongo1 (27017), mongo2 (27018), mongo3 (27019)
   - Buffer em ficheiro (mqtt_fallback.json) quando MongoDB indisponível
   - Reconexão automática ao broker MQTT
 
-Uso: python ponte1_mqtt_to_mongo.py [grupo]
+NOTA: A deteção de outliers foi movida para o PC1_02 (MongoDB→MQTT).
+      O MongoDB fica como arquivo raw completo — útil para auditoria.
+      A lógica de Score (odd=even) corre no PC2_02.
+
+Uso: python PC1_01_mqtt_to_mongo.py [grupo]
      (grupo por omissão: 32)
 """
 
 import json
-import math
+import time
 import sys
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -31,11 +32,11 @@ from pymongo.write_concern import WriteConcern
 
 # ─── CONFIGURAÇÃO ─────────────────────────────────────────────────────────────
 
-BROKER = "broker.emqx.io"   # broker público MQTT
+BROKER = "broker.mqtt-dashboard.com"
 PORT   = 1883
-GRUPO  = 32                  # número do grupo (pode ser passado como argumento)
+GRUPO  = 32
 
-MONGO_HOSTS = [              # PC1 — réplicas locais
+MONGO_HOSTS = [
     ("localhost", 27017),
     ("localhost", 27018),
     ("localhost", 27019),
@@ -43,30 +44,17 @@ MONGO_HOSTS = [              # PC1 — réplicas locais
 
 FALLBACK_FILE = Path(__file__).parent / "mqtt_fallback.json"
 
-# Detecção de outliers em dois critérios combinados:
-#   a) |valor - último válido| > DELTA_MAX → variação brusca → verifica Z-score
-#   b) Z-score > Z_THRESHOLD               → estatisticamente anómalo
-# Ambos têm de ser verdade para rejeitar. Subidas graduais (delta ≤ DELTA_MAX)
-# são sempre aceites, independentemente do Z-score.
-# Sem limites fixos — o delta+Z-score é suficiente para qualquer sensor.
-DELTA_MAX      = 7.0
-Z_THRESHOLD    = 2.5
-JANELA_TAMANHO = 20
-
 # ─── ESTADO GLOBAL ────────────────────────────────────────────────────────────
 
-_client_mongo  = None        # cliente MongoClient ativo
+_client_mongo  = None
 _porta_atual   = None
-_fila_fallback = []          # msgs em espera quando Mongo indisponível
+_fila_fallback = []
 
-# Janelas deslizantes para Z-score (só recebem valores válidos)
-_janela_som  = deque(maxlen=JANELA_TAMANHO)
-_janela_temp = deque(maxlen=JANELA_TAMANHO)
-# Última leitura válida — para calcular o delta
-_ultimo_som_valido  = None
-_ultimo_temp_valido = None
+_total = {"movimento": 0, "temperatura": 0, "som": 0}
 
 _write_concern = WriteConcern(w="majority")
+
+# Sem outlier state aqui — deteção movida para PC1_02
 
 # ─── FALLBACK EM FICHEIRO ──────────────────────────────────────────────────────
 
@@ -121,17 +109,9 @@ def _get_db(grupo: int):
 
     raise ConnectionError("MongoDB completamente indisponível.")
 
-# ─── VALIDAÇÃO DE DADOS ANÓMALOS ──────────────────────────────────────────────
-
-def _parse_float(v):
-    """Tenta converter para float; devolve None se impossível."""
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+# ─── INSERÇÃO NAS COLEÇÕES MONGO ──────────────────────────────────────────────
 
 def _data_valida(s: str) -> bool:
-    """Verifica se uma string de data/hora é plausível."""
     if not s:
         return False
     s = str(s).strip()[:19]
@@ -146,118 +126,16 @@ def _data_valida(s: str) -> bool:
     except ValueError:
         return False
 
-def _iqr_outlier(valor: float, janela: deque) -> bool:
-    """
-    Detecta outlier pelo método IQR (Interquartile Range).
-    Só activa quando a janela tem pelo menos 5 leituras válidas.
-    outlier se valor < Q1 - 1.5*IQR  ou  valor > Q3 + 1.5*IQR
-    """
-    if len(janela) < 5:
-        return False   # amostras insuficientes — aceita sem avaliar
-    dados = sorted(janela)
-    n     = len(dados)
-    q1    = dados[n // 4]
-    q3    = dados[(3 * n) // 4]
-    iqr   = q3 - q1
-    if iqr == 0:
-        return False   # todos os valores iguais — não há desvio para avaliar
-    return valor < (q1 - IQR_FATOR * iqr) or valor > (q3 + IQR_FATOR * iqr)
-
-def _zscore_outlier(valor: float, janela: deque) -> tuple[bool, float, float]:
-    """
-    Z-score sobre a janela de leituras válidas.
-    Devolve (é_outlier, média, desvio_padrão).
-    """
-    n = len(janela)
-    if n < 5:
-        return False, 0.0, 0.0
-    media = sum(janela) / n
-    std   = math.sqrt(sum((x - media) ** 2 for x in janela) / n)
-    std   = max(std, 0.01)
-    z     = abs(valor - media) / std
-    return z > Z_THRESHOLD, media, std
-
-def _e_outlier(valor: float, ultimo_valido, janela: deque) -> tuple[bool, str]:
-    """
-    Nível 2 — Delta + Z-score.
-    - Se delta ≤ DELTA_MAX: aceita sempre (subida gradual legítima).
-    - Se delta > DELTA_MAX E Z-score > threshold: outlier.
-    - Se delta > DELTA_MAX mas Z-score ok: aceita (variação brusca mas estatisticamente plausível).
-    Devolve (é_outlier, mensagem_debug).
-    """
-    if ultimo_valido is None:
-        return False, ""
-
-    delta = abs(valor - ultimo_valido)
-
-    if delta <= DELTA_MAX:
-        return False, ""  # subida gradual — aceita sem verificar Z-score
-
-    # Delta grande — verifica Z-score
-    is_z, media, std = _zscore_outlier(valor, janela)
-    if is_z:
-        z = abs(valor - media) / std
-        return True, (f"valor={valor:.2f} | delta={delta:.2f} > {DELTA_MAX} "
-                      f"e z={z:.1f} > {Z_THRESHOLD} | "
-                      f"média={media:.2f} std={std:.2f}")
-    return False, ""  # delta grande mas Z-score ok — aceita
-
-def _validar_som(valor_raw) -> tuple:
-    """
-    Rejeita tipo de dados errado.
-    Rejeita outliers via Delta + Z-score:
-      - delta ≤ 7  → aceita sempre (subida gradual)
-      - delta > 7  E Z-score > 2.5 → outlier
-    Sem limites fixos — funciona para qualquer escala de sensor.
-    """
-    global _ultimo_som_valido
-
-    v = _parse_float(valor_raw)
-    if v is None:
-        print(f"[Anomalia som] valor não numérico: {valor_raw!r}")
-        return None, False
-
-    is_out, msg = _e_outlier(v, _ultimo_som_valido, _janela_som)
-    if is_out:
-        print(f"[Outlier som] {msg}")
-        return None, False
-
-    _janela_som.append(v)
-    _ultimo_som_valido = v
-    return v, True
-
-def _validar_temperatura(valor_raw) -> tuple:
-    """
-    Rejeita tipo de dados errado.
-    Rejeita outliers via Delta + Z-score:
-      - delta ≤ 7  → aceita sempre (subida gradual)
-      - delta > 7  E Z-score > 2.5 → outlier
-    Sem limites fixos — funciona para qualquer escala de sensor.
-    """
-    global _ultimo_temp_valido
-
-    v = _parse_float(valor_raw)
-    if v is None:
-        print(f"[Anomalia temp] valor não numérico: {valor_raw!r}")
-        return None, False
-
-    is_out, msg = _e_outlier(v, _ultimo_temp_valido, _janela_temp)
-    if is_out:
-        print(f"[Outlier temp] {msg}")
-        return None, False
-
-    _janela_temp.append(v)
-    _ultimo_temp_valido = v
-    return v, True
-
-# ─── INSERÇÃO NAS COLEÇÕES MONGO ──────────────────────────────────────────────
 
 def _inserir(db, topic: str, data: dict):
-    """Valida e insere o documento na coleção correta do MongoDB."""
+    """
+    Guarda o documento no MongoDB sem filtrar outliers.
+    Os outliers são detetados no PC1_02 antes de publicar no MQTT de migração.
+    Apenas validações estruturais são feitas aqui (campos obrigatórios, tipos).
+    """
     wc = _write_concern
 
     if "mazemov" in topic:
-        # Validação básica de tipos
         player  = data.get("Player")
         marsami = data.get("Marsami")
         origem  = data.get("RoomOrigin")
@@ -282,42 +160,55 @@ def _inserir(db, topic: str, data: dict):
             "Hora":        hora,
         }
         db["Movimento"].with_options(write_concern=wc).insert_one(doc)
+        _total["movimento"] += 1
+        if int(origem) == 0 and int(destino) == 0:
+            print(f"[Mongo ✓] Mov #{_total['movimento']} | Marsami {int(marsami)} CANSADO (Status {status})", flush=True)
+        elif int(origem) == 0:
+            print(f"[Mongo ✓] Mov #{_total['movimento']} | Marsami {int(marsami)} largado na Sala {int(destino)}", flush=True)
+        else:
+            print(f"[Mongo ✓] Mov #{_total['movimento']} | Marsami {int(marsami)} Sala {int(origem)} → Sala {int(destino)}", flush=True)
 
     elif "mazetemp" in topic:
         player = data.get("Player")
         hora   = data.get("Hour", data.get("Hora", datetime.now().isoformat()))
-        valor, ok = _validar_temperatura(data.get("Temperature", data.get("temperatura")))
+        valor  = data.get("Temperature", data.get("temperatura"))
 
-        if not ok:
-            return  # rejeitado (anomalia ou outlier) — não guarda no Mongo
-
-        if not _data_valida(hora):
-            hora = datetime.now().isoformat()
-
-        doc = {
-            "Player":      player,
-            "Hour":        hora,
-            "Temperature": valor,
-        }
-        db["temperatura"].with_options(write_concern=wc).insert_one(doc)
-
-    elif "mazesound" in topic:
-        player = data.get("Player")
-        hora   = data.get("Hour", data.get("Hora", datetime.now().isoformat()))
-        valor, ok = _validar_som(data.get("Sound", data.get("som")))
-
-        if not ok:
+        try:
+            valor = float(valor)
+        except (TypeError, ValueError):
+            print(f"[Anomalia temp] valor não numérico: {valor!r}")
             return
 
         if not _data_valida(hora):
             hora = datetime.now().isoformat()
 
-        doc = {
-            "Player": player,
-            "Hour":   hora,
-            "Sound":  valor,
-        }
-        db["Som"].with_options(write_concern=wc).insert_one(doc)
+        # Guarda RAW — outlier é detetado no PC1_02
+        db["temperatura"].with_options(write_concern=wc).insert_one({
+            "Player": player, "Hour": hora, "Temperature": valor,
+        })
+        _total["temperatura"] += 1
+        print(f"[Mongo ✓] Temp #{_total['temperatura']} | {valor}ºC", flush=True)
+
+    elif "mazesound" in topic:
+        player = data.get("Player")
+        hora   = data.get("Hour", data.get("Hora", datetime.now().isoformat()))
+        valor  = data.get("Sound", data.get("Som"))
+
+        try:
+            valor = float(valor)
+        except (TypeError, ValueError):
+            print(f"[Anomalia som] valor não numérico: {valor!r}")
+            return
+
+        if not _data_valida(hora):
+            hora = datetime.now().isoformat()
+
+        # Guarda RAW — outlier é detetado no PC1_02
+        db["Som"].with_options(write_concern=wc).insert_one({
+            "Player": player, "Hour": hora, "Sound": valor,
+        })
+        _total["som"] += 1
+        print(f"[Mongo ✓] Som #{_total['som']} | {valor}dB", flush=True)
 
 # ─── PROCESSAMENTO DA FILA DE FALLBACK ────────────────────────────────────────
 
@@ -408,7 +299,6 @@ def main():
 
     _carregar_fila()
 
-    # Verificar ligação inicial ao Mongo
     try:
         _get_db(grupo)
         print(f"[Mongo] Ligado a porta {_porta_atual}")
@@ -417,12 +307,16 @@ def main():
         print("Verifique se o Docker está a correr (docker-compose up -d)")
         sys.exit(1)
 
-    _processar_fila(grupo)  # recupera fila de execução anterior
+    _processar_fila(grupo)
 
+    uid = f"pisid_g32_pc1_{grupo}_{int(time.time())}"
     c = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
+        client_id=uid,
+        clean_session=True,
         userdata={"topics": topics, "grupo": grupo},
     )
+    print(f"[MQTT] Client ID: {uid}", flush=True)
     c.on_connect    = on_connect
     c.on_disconnect = on_disconnect
     c.on_message    = on_message
